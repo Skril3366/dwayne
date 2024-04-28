@@ -1,0 +1,20 @@
+#+TITLE: Phone
+
+* INBOX Some inbox entry
+:PROPERTIES:
+:CREATED:  [2024-04-28 Sun 09:28]
+:END:
+Some lenghty
+multiline
+description of it
+
+* INBOX Another inbox entry without descripiton
+:PROPERTIES:
+:CREATED:  [2024-04-28 Sun 09:24]
+:END:
+
+* INBOX And a third one scheduled
+SCHEDULED: <2024-05-03 Fri>
+:PROPERTIES:
+:CREATED:  [2024-04-27 Sat 16:50]
+:END:

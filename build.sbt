@@ -1,12 +1,7 @@
 scalaVersion := "3.3.3"
 
-enablePlugins(ScalaNativePlugin)
-
-import scala.scalanative.build._
-
-nativeConfig ~= { c =>
-  c.withLTO(LTO.none)
-    .withMode(Mode.debug)
-    // .withMode(Mode.release) // NOTE: use for production build instead of debug
-    .withGC(GC.immix)
-}
+lazy val dwayne = project
+  .in(file("."))
+  .settings(
+    libraryDependencies += "dev.zio" %% "zio" % "2.0.22"
+  )
