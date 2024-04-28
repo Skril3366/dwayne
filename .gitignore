@@ -3,5 +3,8 @@
 
 .bsp/
 .metals/
+.bloop/
 
 target/
+
+.DS_Store
