@@ -1,10 +1,7 @@
 package dwayne
 
-import java.io.DataInputStream
 import java.io.FileNotFoundException
-import java.nio.charset.StandardCharsets
 import scala.io.Source
-import scala.util.Using._
 import zio.*
 
 object FileReader {

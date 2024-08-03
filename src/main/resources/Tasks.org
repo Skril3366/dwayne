@@ -1,14 +1,14 @@
-#+TITLE: Phone
+#+TITLE: Title
 
 * INBOX Some inbox entry
 :PROPERTIES:
 :CREATED:  [2024-04-28 Sun 09:28]
 :END:
-Some lenghty
-multiline
+Some lengthy
+multi-line
 description of it
 
-* INBOX Another inbox entry without descripiton
+** TODO Another inbox entry without description
 :PROPERTIES:
 :CREATED:  [2024-04-28 Sun 09:24]
 :END:
