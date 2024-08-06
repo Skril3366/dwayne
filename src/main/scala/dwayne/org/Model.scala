@@ -1,6 +1,6 @@
 package dwayne.org
 
-import dwayne.data.Forest
+// import dwayne.data.Forest
 import java.time.format.DateTimeFormatter
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -35,9 +35,14 @@ object ScheduledType {
 }
 
 case class OrgFile(
-    title: Option[String],
-    tasks: Forest[Task]
+    title: Option[String] = None,
+    // tasks: Forest[Task] // TODO: implement tree instead of list
+    tasks: List[Task] = List.empty
 )
+object OrgFile {
+  val titleLense = GenLens[OrgFile](_.title)
+  val tasksLense = GenLens[OrgFile](_.tasks)
+}
 
 case class Task(
     level: Int = 0,
