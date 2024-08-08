@@ -1,25 +1,24 @@
 package dwayne
 
-// import cats.data.NonEmptyList
-// import cats.data.Validated
-// import cats.data.Validated.Invalid
-// import cats.data.Validated.Valid
 import cats.syntax.all.*
 import dwayne.codec.asIso
-// import dwayne.codec.Codec
-// import dwayne.codec.CodecError
-import dwayne.codec.IsoStringTransformer
-// import dwayne.codec.Location
-import dwayne.codec.StringTransformer
+import dwayne.codec.Codec
+import dwayne.codec.CodecError
+import dwayne.codec.IsoParser
+import dwayne.codec.Location
+import dwayne.codec.Parser
+import dwayne.codec.ParserInput
+import dwayne.codec.ParserResult
+import dwayne.codec.TransformParser
 import dwayne.codec.ValidatedCodec
-// import dwayne.data.Forest
-// import dwayne.data.TreeNodeWithLevel
-// import dwayne.org.Properties
-// import java.time.format.DateTimeFormatter
+import dwayne.data.Forest
+import dwayne.data.NodeAppendingError
+import dwayne.org.Properties
+import java.time.format.DateTimeFormatter
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.util.Locale
 import monocle.Lens
-// import java.util.Locale
 import scala.util.Failure
 import scala.util.Success
 
@@ -42,294 +41,267 @@ package org {
   val titleLineRegex =
     "(\\*+)\\s+(\\b[A-Z]+\\b)?\\s*(\\[#[A-Z]\\])?\\s*(.*?)\\s*(:(\\w+:)+)?$".r
 
-  //  ------------------ transformers -------------------------
-
-  private val titleTransformer = new IsoStringTransformer[Task] {
-    def consume(s: String) = s.strip.split("\n").toList match {
-      case titleLineRegex(a, s, sp, t, ts, _) :: tail =>
-        import Task.*
-        val level    = a.length
-        val state    = unnulifyAndStrip(s)
-        val priority = unnulifyAndStrip(sp).flatMap(priorityStringToInt)
-        val title    = unnulifyAndStrip(t).getOrElse("")
-        val tags     = unnulifyAndStrip(ts).toList.flatMap(parseTags)
-        val modifyTask = List(
-          levelLense.replace(level),
-          stateLense.replace(state),
-          priorityLense.replace(priority),
-          titleLense.replace(title),
-          tagsLense.replace(tags)
-        ).foldLeft(identity: Task => Task)((acc, f) => acc.andThen(f))
-        (modifyTask.valid, tail.mkString("\n"))
-      case _ => error(s, f"Unable to parse title string: $s")
+  def skipBlank(s: String): (String, Location => Location) = {
+    val lines                     = s.split("\n")
+    val (skippedLines, restLines) = lines.span(_.trim.isEmpty)
+    val skipLines                 = Location.modifyLine(_ + skippedLines.length)
+    restLines.toList match {
+      case Nil => (s, skipLines)
+      case l :: rest =>
+        val newL        = l.stripLeading
+        val skipColumns = Location.modifyColumn(_ + (l.length - newL.length))
+        ((newL :: rest).mkString("\n"), skipColumns.andThen(skipLines))
     }
   }
 
-  private def timeTransformer(name: String, separator: PairedSeparator, lense: Lens[Task, Option[ScheduledType]]) =
-    new StringTransformer[Unit, ScheduledType] {
-      def consume(s: String) = {
-        val regex = f"$name: ${separator.left}([^${separator.right}]*)${separator.right}(.*)".r
-        s.strip.split("\n").toList match {
-          case regex(time, left) :: rest =>
+  //  ------------------ parsers -------------------------
+
+  private val titleParser = new IsoParser[Task] {
+    def parse(s: ParserInput) = {
+      val (lines, modifyLocation) = skipBlank(s.str)
+      val newLocation             = modifyLocation(s.location)
+      lines.split("\n").toList match {
+        case titleLineRegex(a, st, sp, t, ts, _) :: tail =>
+          import Task.*
+          val level    = a.length
+          val state    = unnulifyAndStrip(st)
+          val priority = unnulifyAndStrip(sp).flatMap(priorityStringToInt)
+          val title    = unnulifyAndStrip(t).getOrElse("")
+          val tags     = unnulifyAndStrip(ts).toList.flatMap(parseTags)
+          val modifyTask = List(
+            levelLense.replace(level),
+            stateLense.replace(state),
+            priorityLense.replace(priority),
+            titleLense.replace(title),
+            tagsLense.replace(tags)
+          ).foldLeft(identity: Task => Task)((acc, f) => acc.andThen(f))
+          ParserResult(
+            modifyTask.valid,
+            ParserInput(
+              tail.mkString("\n"),
+              Location.nextLine(newLocation)
+            )
+          )
+        case _ => ParserResult.error(f"Unable to parse title string", s)
+      }
+    }
+  }
+
+  // TODO: handle different recurrence formats
+  private def timeParser(name: String, separator: PairedSeparator, lense: Lens[Task, Option[ScheduledType]]) =
+    new Parser[ScheduledType] {
+      def parse(s: ParserInput) = {
+        val regex                   = f"$name: ${separator.left}([^${separator.right}]*)${separator.right}(.*)".r
+        val (lines, modifyLocation) = skipBlank(s.str)
+        val newLocation             = modifyLocation(s.location)
+        lines.split("\n").toList match {
+          case l @ regex(time, left) :: rest =>
             ScheduledType.bestMatch(time) match {
-              case Success(parsedTime) => (((_: Unit) => parsedTime).valid, (left +: rest).mkString("\n"))
-              case Failure(e)          => error(s, f"Unable to parse time string: $time")
+              case Success(parsedTime) =>
+                ParserResult(
+                  parsedTime.valid,
+                  ParserInput(
+                    (left +: rest).mkString("\n"),
+                    Location.modifyColumn(_ + (l.length - rest.length))(newLocation)
+                  )
+                )
+              case Failure(e) => ParserResult.error(f"Unable to parse time string: $time", s)
             }
-          case _ => error(s, f"Unable to parse time string: $s")
+          case _ => ParserResult.error(f"Unable to parse time string", s)
         }
       }
-    }
-      .lift[Task, Task](_ => (), b => lense.replace(b.some))
+    }.toNullary
+      .lift[Task, Task]((f: Unit => ScheduledType) => lense.replace(f(()).some))
       .asIso
 
-  private val propertyTransformer = new IsoStringTransformer[Task] {
-    def consume(s: String) = {
-      val regex = "^:([a-zA-Z0-9]+): (.*)$".r
-      s.strip.split("\n").toList match {
+  private val propertyParser = new IsoParser[Task] {
+    def parse(s: ParserInput) = {
+      val regex                   = "^:([a-zA-Z0-9]+): (.*)$".r
+      val (lines, modifyLocation) = skipBlank(s.str)
+      val newLocation             = modifyLocation(s.location)
+      lines.split("\n").toList match {
         case regex(k, v) :: rest =>
-          (Task.propertiesLense.modify(_ + (k -> v)).valid, rest.mkString("\n"))
-        case _ => error(s, f"Unable to parse property string: $s")
+          ParserResult(
+            Task.propertiesLense.modify(_ + (k -> v)).valid,
+            ParserInput(
+              rest.mkString("\n"),
+              Location.nextLine(newLocation)
+            )
+          )
+        case _ => ParserResult.error(f"Unable to parse property string", s)
       }
     }
   }
 
-  private val bodyTransformer = new IsoStringTransformer[Task] {
-    def consume(s: String) =
-      s.split("\n").toList match {
-        case Nil                                          => error(s, "consumed everything")
-        case head :: rest if head.isEmpty                 => error(s, "consumed everything")
-        case head :: rest if titleLineRegex.matches(head) => error(s, "Start of the next task")
+  private val bodyParser = new IsoParser[Task] {
+    def parse(s: ParserInput) =
+      s.str.split("\n").toList match {
+        case Nil                                          => ParserResult.error("consumed everything", s)
+        case head :: rest if head.isEmpty                 => ParserResult.error("consumed everything", s)
+        case head :: rest if titleLineRegex.matches(head) => ParserResult.error("Start of the next task", s)
         case head :: rest =>
-          (Task.bodyLense.modify(a => if a.isEmpty then s"$head" else s"$a\n$head").valid, rest.mkString("\n"))
+          ParserResult(
+            Task.bodyLense.modify(a => if a.isEmpty then s"$head" else s"$a\n$head").valid,
+            ParserInput(
+              rest.mkString("\n"),
+              Location.nextLine(s.location)
+            )
+          )
       }
   }
 
-  private val dateTimeTransformer = IsoStringTransformer
+  private val dateTimeParser = IsoParser
     .makeParallel(
-      timeTransformer("SCHEDULED", PairedSeparator.Triangles, Task.scheduledLense),
-      timeTransformer("DEADLINE", PairedSeparator.Triangles, Task.deadlineLense),
-      timeTransformer("CLOSED", PairedSeparator.Brackets, Task.closedLense),
+      timeParser("SCHEDULED", PairedSeparator.Triangles, Task.scheduledLense),
+      timeParser("DEADLINE", PairedSeparator.Triangles, Task.deadlineLense),
+      timeParser("CLOSED", PairedSeparator.Brackets, Task.closedLense),
     )
 
-  private val taskTransformer = titleTransformer
-    .andThen(dateTimeTransformer.repeatedWhileValid)
-    .andThen(IsoStringTransformer.stringConsumer[Task](":PROPERTIES:"))
-    .andThen(propertyTransformer.repeatedWhileValid)
-    .andThen(IsoStringTransformer.stringConsumer[Task](":END:"))
-    .andThen(bodyTransformer.repeatedWhileValid)
+  private val taskParser = titleParser
+    .andThen(dateTimeParser.repeatedWhileValid)
+    .andThen(IsoParser.stringConsumer[Task](":PROPERTIES:"))
+    .andThen(propertyParser.repeatedWhileValid)
+    .andThen(IsoParser.stringConsumer[Task](":END:"))
+    .andThen(bodyParser.repeatedWhileValid)
     .asIso
 
-  private val orgFileTitleTransformer = new IsoStringTransformer[OrgFile] {
-    def consume(s: String): (ValidatedCodec[OrgFile => OrgFile], String) = {
-      val regex = "#\\+TITLE: (.*)".r
-      s.strip.split("\n").toList match {
+  private val orgFileTitleParser = new IsoParser[OrgFile] {
+    def parse(s: ParserInput) = {
+      val regex                   = "#\\+TITLE: (.*)$".r
+      val (lines, modifyLocation) = skipBlank(s.str)
+      val newLocation             = modifyLocation(s.location)
+      lines.split("\n").toList match {
         case regex(title) :: rest =>
-          (OrgFile.titleLense.replace(title.some).valid, rest.mkString("\n"))
-        case _ => error(s, f"Unable to parse title string: $s")
+          ParserResult(
+            OrgFile.titleLense.replace(title.some).valid,
+            ParserInput(
+              rest.mkString("\n"),
+              Location.nextLine(newLocation)
+            )
+          )
+        case _ => ParserResult.error(f"Unable to parse title string", s)
       }
     }
   }
 
-  private val listOfTasksTransformer =
-    taskTransformer.toListTransformer.repeatedWhileValid
-      .lift[OrgFile, OrgFile](
-        _.tasks.map(t => (_: Task) => t),
-        l => OrgFile.tasksLense.replace(l.map(_(Task())))
+  val forestTaskParser: TransformParser[Forest[Task], Forest[Task]] =
+    taskParser
+      .toListParser(Task())
+      .repeatedWhileValid
+      .liftValidated[Forest[Task], Forest[Task]](
+        _.toList.map(_.value),
+        l =>
+          Forest.fromList(l, _.level) match {
+            case Left(value)  => CodecError(value.toString).invalidNec
+            case Right(value) => value.valid
+          }
       )
 
-  val orgFileTransformer = orgFileTitleTransformer.andThen(listOfTasksTransformer)
+  private val orgFileParser = orgFileTitleParser
+    .andThen(
+      forestTaskParser
+        .lift[OrgFile, OrgFile](OrgFile.tasksLense.modify)
+    )
 
   // ------------------ codecs ------------------------------
 
-  // given Codec[OrgFile] with {
-  //   extension (s: String)
-  //     override def decode: ValidatedCodec[OrgFile] =
-  //       s.split("\n").toList match {
-  //         case List() => OrgFile(None, Forest.empty).valid
-  //         case title :: tasks if title.matches("#\\+TITLE:.*") =>
-  //           val titleStr = title.replace("#+TITLE: ", "").trim()
-  //           val tasksForest: ValidatedCodec[Forest[Task]] =
-  //             tasks.mkString("\n").decode
-  //           tasksForest.map(OrgFile(titleStr.some, _))
-  //         case _ =>
-  //           ValidatedCodec.error(
-  //             f"Unexpected error with: $s",
-  //             Location(0).some
-  //           )
-  //       }
-  //
-  //   extension (a: OrgFile)
-  //     override def encode: String =
-  //       a.title
-  //         .map(title => f"""|#+TITLE: ${title}
-  //                           |
-  //                           |${a.tasks.encode}
-  //         """.stripMargin)
-  //         .getOrElse(a.tasks.encode)
-  // }
-  //
-  // given Codec[Forest[Task]] with {
-  //   extension (s: String)
-  //     override def decode: ValidatedCodec[Forest[Task]] = {
-  //       val linesGrouppedByTasks: List[List[String]] =
-  //         s.split("\n")
-  //           .toList
-  //           .dropWhile(_.isEmpty)
-  //           .foldLeft(List.empty[List[String]])((groups, line) =>
-  //             (titleLineRegex.matches(line), groups.isEmpty) match {
-  //               case (true, true)  => List(List(line))
-  //               case (true, false) => groups :+ List(line)
-  //               case _             => groups.init :+ (groups.last :+ line)
-  //             }
-  //           )
-  //
-  //       val tasks: List[ValidatedCodec[TreeNodeWithLevel[Task]]] =
-  //         linesGrouppedByTasks.map(
-  //           _.mkString("\n").decode: ValidatedCodec[TreeNodeWithLevel[Task]]
-  //         )
-  //
-  //       tasks.map(_.map(List(_))) match {
-  //         case Nil => Forest.empty.valid
-  //         case head :: tail =>
-  //           tail.fold(head)((a, b) => a combine b) match {
-  //             case i @ Invalid(_) => i
-  //             case Valid(a) =>
-  //               Forest
-  //                 .fromNodes(a)
-  //                 .leftMap(e => NonEmptyList.one(CodecError(e.toString)))
-  //                 .toValidated
-  //           }
-  //       }
-  //     }
-  //
-  //   extension (a: Forest[Task])
-  //     override def encode: String =
-  //       a.toList.map(_.encode).mkString("\n")
-  // }
-  //
-  // given Codec[TreeNodeWithLevel[Task]] with {
-  //   extension (s: String)
-  //     override def decode: ValidatedCodec[TreeNodeWithLevel[Task]] =
-  //       (s.decode: ValidatedCodec[Task])
-  //         .map(t =>
-  //           TreeNodeWithLevel(
-  //             s.takeWhile(_ == '*').length - 1 + Forest.rootLevel, // TODO: understand how to make this calculation more generic
-  //             t
-  //           )
-  //         )
-  //
-  //   extension (a: TreeNodeWithLevel[Task])
-  //     override def encode: String =
-  //       f"${"*" * (a.level + Forest.rootLevel + 1)} ${a.value.encode}" // TODO: understand how to make this calculation more generic
-  //
-  // }
-  //
-  // given Codec[Task] with {
-  //
-  //   extension (s: String)
-  //     override def decode: ValidatedCodec[Task] = {
-  //
-  //       val lines = s.split("\n").toList
-  //
-  //       def taskWithParcedTitle(titleLine: String): ValidatedCodec[Task] =
-  //         titleLine match {
-  //           case titleLineRegex(s, sp, t, ts, _) =>
-  //             def unnulifyAndStrip(s: String): Option[String] =
-  //               Option(s).map(_.strip).filter(_.nonEmpty)
-  //             Task(
-  //               state = unnulifyAndStrip(s),
-  //               title = unnulifyAndStrip(t).getOrElse(""),
-  //               priority = unnulifyAndStrip(sp)
-  //                 .flatMap(priorityStringToInt(_)),
-  //               tags = unnulifyAndStrip(ts).toList.flatMap(
-  //                 _.split(":").toList.filter(_.nonEmpty)
-  //               )
-  //             ).valid
-  //           case _ =>
-  //             ValidatedCodec.error(
-  //               f"Unable to parse title string: $titleLine"
-  //             )
-  //         }
-  //
-  //       // TODO: parse task contents
-  //       lines.headOption
-  //         .map(taskWithParcedTitle)
-  //         .getOrElse(
-  //           ValidatedCodec.error(
-  //             "No lines provided to task parser"
-  //           )
-  //         )
-  //     }
-  //
-  //   extension (a: Task)
-  //     override def encode: String = {
-  //       val encodedTags: String =
-  //         if (a.tags.isEmpty) "" else f":${a.tags.mkString(":")}:"
-  //
-  //       def encodeScheduledType(
-  //           name: String,
-  //           start: String,
-  //           end: String,
-  //           s: Option[ScheduledType]
-  //       ): Option[String] =
-  //         s.map(x => f"$name: $start${x.encode}$end")
-  //
-  //       val encodedTimeProperties = List(
-  //         encodeScheduledType("CLOSED", "[", "]", a.closed),
-  //         encodeScheduledType("DEADLINE", "<", ">", a.deadline),
-  //         encodeScheduledType("SCHEDULED", "<", ">", a.scheduled)
-  //       ).flatMap(_.toList).mkString(" ")
-  //
-  //       val encodedPriority = a.priority
-  //         .map { i =>
-  //           val priorityLetter = ('A' + i).toChar
-  //           f" [#$priorityLetter]"
-  //         }
-  //         .getOrElse("")
-  //
-  //       val titleAndMeta =
-  //         f"""|${a.state.getOrElse("")}$encodedPriority ${a.title} $encodedTags
-  //             |$encodedTimeProperties
-  //             |${a.properties.encode}
-  //       """.stripMargin
-  //           .split("\n")
-  //           .filter(_.nonEmpty)
-  //           .mkString("\n")
-  //           .trim()
-  //
-  //       val body = f"${if (a.body.nonEmpty) f"\n${a.body}" else "\n"}"
-  //
-  //       f"$titleAndMeta$body\n"
-  //     }
-  // }
-  //
-  // given Codec[Properties] with {
-  //   extension (s: String) override def decode: ValidatedCodec[Properties] = ???
-  //
-  //   extension (a: Properties)
-  //     override def encode: String =
-  //       if (a.isEmpty) ""
-  //       else
-  //         f"""|:PROPERTIES:
-  //             |${a.map { case (k, v) => f":$k: $v" }.mkString("\n")}
-  //             |:END:
-  //         """.stripMargin
-  //
-  // }
-  //
-  // given Codec[ScheduledType] with {
-  //   extension (s: String) override def decode: ValidatedCodec[ScheduledType] = ???
-  //
-  //   extension (a: ScheduledType)
-  //     override def encode: String =
-  //       DateTimeFormatter
-  //         .ofPattern(
-  //           a match {
-  //             case _: LocalDate     => "yyyy-MM-dd EEE"
-  //             case _: LocalDateTime => "yyyy-MM-dd EEE HH:mm"
-  //           },
-  //           Locale.ENGLISH
-  //         )
-  //         .format(a);
-  // }
+  given Codec[OrgFile] with {
+    extension (s: String)
+      override def decode: ValidatedCodec[OrgFile] =
+        orgFileParser.parse(ParserInput.init(s))._1.map(_(OrgFile()))
+
+    extension (a: OrgFile)
+      override def encode: String =
+        a.title
+          .map(title => f"""|#+TITLE: ${title}
+                            |
+                            |${a.tasks.encode}
+          """.stripMargin)
+          .getOrElse(a.tasks.encode)
+  }
+
+  given Codec[Forest[Task]] with {
+    extension (s: String)
+      override def decode: ValidatedCodec[Forest[Task]] =
+        forestTaskParser.parse(ParserInput.init(s))._1.map(_(Forest.empty))
+
+    extension (a: Forest[Task])
+      override def encode: String =
+        a.toList.map(_.value.encode).mkString("\n")
+  }
+
+  given Codec[Task] with {
+    extension (s: String) override def decode: ValidatedCodec[Task] = taskParser.parse(ParserInput.init(s))._1.map(_(Task()))
+
+    extension (a: Task)
+      override def encode: String = {
+        val encodedTags: String =
+          if (a.tags.isEmpty) "" else f":${a.tags.mkString(":")}:"
+
+        def encodeScheduledType(
+            name: String,
+            start: String,
+            end: String,
+            s: Option[ScheduledType]
+        ): Option[String] =
+          s.map(x => f"$name: $start${x.encode}$end")
+
+        val encodedTimeProperties = List(
+          encodeScheduledType("CLOSED", "[", "]", a.closed),
+          encodeScheduledType("DEADLINE", "<", ">", a.deadline),
+          encodeScheduledType("SCHEDULED", "<", ">", a.scheduled)
+        ).flatMap(_.toList).mkString(" ")
+
+        val encodedPriority = a.priority
+          .map { i =>
+            val priorityLetter = ('A' + i).toChar
+            f" [#$priorityLetter]"
+          }
+          .getOrElse("")
+
+        val titleAndMeta =
+          f"""|${"*" * a.level}${a.state.getOrElse("")}$encodedPriority ${a.title} $encodedTags
+              |$encodedTimeProperties
+              |${a.properties.encode}
+        """.stripMargin
+            .split("\n")
+            .filter(_.nonEmpty)
+            .mkString("\n")
+            .trim()
+
+        val body = f"${if (a.body.nonEmpty) f"\n${a.body}" else "\n"}"
+
+        f"$titleAndMeta$body\n"
+      }
+  }
+
+  given Codec[Properties] with {
+    extension (s: String) override def decode: ValidatedCodec[Properties] = ???
+
+    extension (a: Properties)
+      override def encode: String =
+        if (a.isEmpty) ""
+        else
+          f"""|:PROPERTIES:
+              |${a.map { case (k, v) => f":$k: $v" }.mkString("\n")}
+              |:END:
+          """.stripMargin
+
+  }
+
+  given Codec[ScheduledType] with {
+    extension (s: String) override def decode: ValidatedCodec[ScheduledType] = ???
+
+    extension (a: ScheduledType)
+      override def encode: String =
+        DateTimeFormatter
+          .ofPattern(
+            a match {
+              case _: LocalDate     => "yyyy-MM-dd EEE"
+              case _: LocalDateTime => "yyyy-MM-dd EEE HH:mm"
+            },
+            Locale.ENGLISH
+          )
+          .format(a);
+  }
 }

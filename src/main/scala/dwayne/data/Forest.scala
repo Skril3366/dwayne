@@ -2,6 +2,7 @@ package dwayne.data
 
 import cats.*
 import cats.implicits.*
+import monocle.macros.GenLens
 
 // NOTE:
 // Level starts at 0 and increments as a tree gets deeper for e.g.:
@@ -24,17 +25,21 @@ case class NodeAppendingErrorToTreeNode[+A](level: Int, value: A, msg: String)
 case class NodeAppendingErrorToForest[+A](level: Int, value: A, msg: String)
     extends NodeAppendingError[A](level, value: A, msg, "Forest")
 
-case class Forest[+A](
+case class Forest[A](
     trees: List[TreeNode[A]]
 ) {
-  def toList: List[TreeNodeWithLevel[A]] = trees.flatMap(_.toList)
+  def toList: List[TreeNode[A]] = trees.flatMap(_.toList)
+
+  def combine(f: Forest[A]): Forest[A] =
+    Forest(trees ++ f.trees)
+
   def appendAtLevel[B >: A](
       level: Int,
       value: B
   ): Either[NodeAppendingError[B], Forest[B]] =
     trees match {
       case _ if level < Forest.rootLevel =>
-        NodeAppendingErrorToForest(level,value, "Level is less than rootLevel").asLeft
+        NodeAppendingErrorToForest(level, value, "Level is less than rootLevel").asLeft
       case l if level == Forest.rootLevel =>
         Forest(l :+ (TreeNode(value))).asRight
       case Nil =>
@@ -50,13 +55,7 @@ case class Forest[+A](
 }
 
 case class TreeNode[+A](value: A, children: List[TreeNode[A]] = List.empty) {
-  def toList: List[TreeNodeWithLevel[A]] = this match {
-    case TreeNode(value, children) =>
-      TreeNodeWithLevel(Forest.rootLevel, value)
-        :: children
-          .flatMap(_.toList)
-          .map(n => n.copy(level = n.level + 1))
-  }
+  def toList: List[TreeNode[A]] = this :: children.flatMap(_.toList)
 
   def appendAtLevel[B >: A](
       level: Int,
@@ -85,21 +84,19 @@ case class TreeNode[+A](value: A, children: List[TreeNode[A]] = List.empty) {
     }
 }
 
-case class TreeNodeWithLevel[+A](
-    level: Int,
-    value: A
-) {}
-
 object Forest {
-  val rootLevel = 0
-  def empty[A] = Forest[A](List.empty)
+  def treesLense[A] = GenLens[Forest[A]](_.trees)
 
-  def fromNodes[A](
-      l: List[TreeNodeWithLevel[A]]
-  ): Either[NodeAppendingError[A], Forest[A]] =
-    l.foldLeft(empty[A].asRight) { (a, b) =>
+  val rootLevel = 1
+  def empty[A]  = Forest[A](List.empty)
+
+  def fromList[T](
+      l: List[T],
+      levelOf: T => Int
+  ): Either[NodeAppendingError[T], Forest[T]] =
+    l.foldLeft(empty[T].asRight) { (a, b) =>
       a.flatMap(
-        _.appendAtLevel(b.level, b.value)
+        _.appendAtLevel(levelOf(b), b)
       )
     }
 }
