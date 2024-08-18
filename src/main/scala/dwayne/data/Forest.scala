@@ -16,7 +16,8 @@ sealed trait NodeAppendingError[+A](
     msg: String,
     source: String
 ) {
-  override def toString() = s"$source: $msg: $level. $value"
+  override def toString() = s"$source: $msg: $level"
+  def getValue: A = value
 }
 
 case class NodeAppendingErrorToTreeNode[+A](level: Int, value: A, msg: String)
@@ -28,6 +29,7 @@ case class NodeAppendingErrorToForest[+A](level: Int, value: A, msg: String)
 case class Forest[A](
     trees: List[TreeNode[A]]
 ) {
+
   def toList: List[TreeNode[A]] = trees.flatMap(_.toList)
 
   def combine(f: Forest[A]): Forest[A] =
@@ -84,7 +86,18 @@ case class TreeNode[+A](value: A, children: List[TreeNode[A]] = List.empty) {
     }
 }
 
+object TreeNode{
+  given Functor[TreeNode] with {
+    override def map[A, B](fa: TreeNode[A])(f: A => B): TreeNode[B] =
+      TreeNode(f(fa.value), fa.children.map(_.map(f)))
+  }
+}
+
 object Forest {
+  given Functor[Forest] with {
+    override def map[A, B](fa: Forest[A])(f: A => B): Forest[B] =
+      Forest(fa.trees.map(_.map(f)))
+  }
   def treesLense[A] = GenLens[Forest[A]](_.trees)
 
   val rootLevel = 1
