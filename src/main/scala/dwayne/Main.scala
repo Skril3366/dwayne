@@ -1,10 +1,12 @@
 package dwayne
 
-import dwayne.parser.*
-import dwayne.org.*
+// import dwayne.parser.*
+// import dwayne.org.*
 import zio.Console
-import zio.ZIO
+// import zio.ZIO
 import zio.ZIOAppDefault
+// import dwayne.tui.AllTasks
+import dwayne.tui.EditInTextEditor
 
 object Main extends ZIOAppDefault {
 
@@ -34,10 +36,13 @@ object Main extends ZIOAppDefault {
     |  :prop2: value2
     |  :END:
     |  Some body
-    |""".stripMargin
+    |""".stripMargin.trim
 
   def run = for {
-    tasks <- ZIO.succeed(OrgParser.taskForest.parse(PInput(Text(taskStr), Location(0, 0))))
-    _ <- Console.printLine(tasks.toOption.get.result)
+    lines <- EditInTextEditor.editInTextEditor(taskStr)
+    _ <- Console.printLine(lines)
+    // _ <- ZIO.succeed(AllTasks.demo())
+    // tasks <- ZIO.succeed(OrgParser.taskForest.parse(PInput(Text(taskStr), Location(0, 0))))
+    // _ <- Console.printLine(tasks.toOption.get.result)
   } yield ()
 }
