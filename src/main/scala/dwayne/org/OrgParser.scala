@@ -1,12 +1,11 @@
-package dwayne.parser
+package dwayne.org
 
 import cats.catsInstancesForId
 import cats.syntax.all.*
 import cats.Id
 import dwayne.data.Forest
 import dwayne.org.ScheduledType
-import dwayne.org.Task
-import monocle.Lens
+import dwayne.parser.*
 import scala.util.chaining.*
 import scala.util.Failure
 import scala.util.Success
@@ -22,17 +21,6 @@ case class OrgTaskTitle(
 enum PropertyDelimeter(val str: String) {
   case Start extends PropertyDelimeter(":PROPERTIES:")
   case End extends PropertyDelimeter(":END:")
-}
-
-enum PairedSeparator(val left: String, val right: String) {
-  case Brackets extends PairedSeparator(left = "\\[", right = "\\]")
-  case Triangles extends PairedSeparator(left = "<", right = ">")
-}
-
-enum ScheduledField(val name: String, val separator: PairedSeparator, val lense: Lens[Task, Option[ScheduledType]]) {
-  case Scheduled extends ScheduledField("SCHEDULED", PairedSeparator.Triangles, Task.scheduledLense)
-  case Deadline extends ScheduledField("DEADLINE", PairedSeparator.Triangles, Task.deadlineLense)
-  case Closed extends ScheduledField("CLOSED", PairedSeparator.Brackets, Task.closedLense)
 }
 
 case class StopCondition(msg: String) {
@@ -55,12 +43,12 @@ object OrgParser {
 
   def unnulifyAndStrip(s: String): Option[String] =
     Option(s).map(_.strip).filter(_.nonEmpty)
-  private val titleLineRegex =
+  val titleLineRegex =
     "(\\*+)\\s+(\\b[A-Z]+\\b)?\\s*(\\[#[A-Z]\\])?\\s*(.*?)\\s*(:(\\w+:)+)?$".r
 
   // Parsers
-  //
-  private val skipBlankLines = new Parser[Id, Unit] {
+
+  val skipBlankLines = new Parser[Id, Unit] {
     def parse(in: PInput) = {
       val (skippedLines, restLines) = in.text.lines.span(_.trim.isEmpty)
       val skipLines                 = Location.modifyLine(_ + skippedLines.length)
@@ -68,7 +56,7 @@ object OrgParser {
     }
   }
 
-  private val skipBlankSpaces = new Parser[Id, Unit] {
+  val skipBlankSpaces = new Parser[Id, Unit] {
     def parse(in: PInput) =
       in.text.lines match {
         case Nil => PResult((), PInput(Text.empty, in.location))
@@ -79,9 +67,9 @@ object OrgParser {
       }
   }
 
-  private val skipBlanks = skipBlankLines >> skipBlankSpaces
+  val skipBlanks = skipBlankLines >> skipBlankSpaces
 
-  private val taskTitleParser = skipBlanks.pure[ParseResult] >>
+  val taskTitleParser = skipBlanks.pure[ParseResult] >>
     new Parser[ParseResult, OrgTaskTitle] {
       def parse(in: PInput) =
         in.text.lines match {
@@ -105,7 +93,7 @@ object OrgParser {
     }
 
   // TODO: handle different recurrence formats
-  private def timeParser(field: ScheduledField) = skipBlankSpaces.pure[ParseResult] >>
+  def timeParser(field: ScheduledField) = skipBlankSpaces.pure[ParseResult] >>
     new Parser[ParseResult, Task => Task] {
       def parse(in: PInput) = {
         val regex =
@@ -125,7 +113,7 @@ object OrgParser {
       }
     }
 
-  private def lineConsumer(ss: String) = skipBlankSpaces.pure[ParseResult] >>
+  def lineConsumer(ss: String) = skipBlankSpaces.pure[ParseResult] >>
     new Parser[ParseResult, Unit] {
       def parse(in: PInput) = {
         val regex = s"^$ss$$".r
@@ -137,7 +125,7 @@ object OrgParser {
       }
     }
 
-  private val propertyParser = (
+  val propertyParser = (
     skipBlankSpaces.pure[[T] =>> Either[StopCondition | InvalidSyntaxError, T]] >>
       new Parser[[T] =>> Either[StopCondition | InvalidSyntaxError, T], (String, String)] {
         def parse(in: PInput) = {
@@ -163,10 +151,10 @@ object OrgParser {
     }
     .map(_.toMap)
 
-  private val bodyParser = new Parser[[T] =>> Either[StopCondition, T], String] {
+  val bodyParser = new Parser[[T] =>> Either[StopCondition, T], String] {
     def parse(in: PInput) =
       in.text.lines match {
-        case Nil => StopCondition("Consumed everything").asLeft
+        case Nil                                          => StopCondition("Consumed everything").asLeft
         case head :: rest if titleLineRegex.matches(head) => StopCondition("Start of the next task").asLeft
         case head :: rest => PResult(head, PInput(Text(rest), Location.nextLine(in.location))).asRight
       }
@@ -175,7 +163,7 @@ object OrgParser {
     case _                      => false
   }.morph[ParseResult](_.fold(e => UnexpectedError(f"Should not have stopped: ${e.msg}").asLeft, _.asRight))
 
-  private val dateTimeParser: Parser[ParseResult, Task => Task] = Parser
+  val dateTimeParser: Parser[ParseResult, Task => Task] = Parser
     .parallel[ParseResult, Task => Task](
       _.isRight,
       ScheduledField.values.map(timeParser).toList
@@ -187,10 +175,10 @@ object OrgParser {
   val taskParser = for {
     orgTaskTitle <- taskTitleParser
     addDateTimes <- dateTimeParser
-    _ <- lineConsumer(PropertyDelimeter.Start.str)
-    properties <- propertyParser
-    _ <- lineConsumer(PropertyDelimeter.End.str)
-    bodyLines <- bodyParser
+    _            <- lineConsumer(PropertyDelimeter.Start.str)
+    properties   <- propertyParser
+    _            <- lineConsumer(PropertyDelimeter.End.str)
+    bodyLines    <- bodyParser
   } yield Task(
     level = orgTaskTitle.level,
     state = orgTaskTitle.state,
@@ -217,5 +205,28 @@ object OrgParser {
             )
       }
     )
+
+  val orgFileTitle = skipBlanks.pure[ParseResult] >>
+    new Parser[ParseResult, String] {
+      def parse(in: PInput) = {
+        val regex = "#\\+TITLE: (.*)$".r
+        in.text.lines match {
+          case regex(title) :: rest =>
+            PResult(
+              title,
+              PInput(
+                Text(rest),
+                Location.nextLine(in.location)
+              )
+            ).asRight
+          case _ => InvalidSyntaxError(f"Unable to parse title string", in.location).asLeft
+        }
+      }
+    }
+
+  val orgFileParser: Parser[ParseResult, OrgFile] = for {
+    title <- orgFileTitle
+    tasks <- taskForest
+  } yield OrgFile(title.some, tasks)
 
 }

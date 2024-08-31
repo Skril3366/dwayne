@@ -34,6 +34,17 @@ object ScheduledType {
     .format(a);
 }
 
+enum PairedSeparator(val left: String, val right: String) {
+  case Brackets extends PairedSeparator(left = "\\[", right = "\\]")
+  case Triangles extends PairedSeparator(left = "<", right = ">")
+}
+
+enum ScheduledField(val name: String, val separator: PairedSeparator, val lense: Lens[Task, Option[ScheduledType]]) {
+  case Scheduled extends ScheduledField("SCHEDULED", PairedSeparator.Triangles, Task.scheduledLense)
+  case Deadline extends ScheduledField("DEADLINE", PairedSeparator.Triangles, Task.deadlineLense)
+  case Closed extends ScheduledField("CLOSED", PairedSeparator.Brackets, Task.closedLense)
+}
+
 case class OrgFile(
     title: Option[String] = None,
     tasks: Forest[Task] = Forest.empty

@@ -33,6 +33,8 @@ object PResult {
 trait Parser[F[_]: Monad, T] {
   def parse(in: PInput): F[PResult[T]]
 
+  def parseFull(s: String) = parse(PInput(Text(s), Location(0, 0))).map(_.result)
+
   def repeatedUntil(done: F[PResult[T]] => Boolean): Parser[F, List[T]] =
     new Parser[F, List[T]] {
       def parse(in: PInput): F[PResult[List[T]]] =
@@ -107,18 +109,3 @@ object Parser {
     }
   }
 }
-
-// use case
-// val parseTitle: Parser[E, Task => Task] = new ParserMonad {
-//  parse(s: ParseInput): ParseResult[E, Task => Task] = ???
-// }
-// val parseTime: Parser[ScheduledType] = ???
-// val readString: Parser[Unit] = ???
-// val consumeString: Parser[Unit] = ???
-// val parseTimeRecord(name: String, separator: Separator, modifyField: ScheduledType => Task => Task): Parser[Task => Task] = for{
-//  _ <- consumeString
-//  time <- parseTime
-// } yield modifyField(time)
-//
-//type Property = String -> String
-// val parseProperty: Parser[Property] = for{
